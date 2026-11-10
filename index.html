@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>שער בקרת אובליגו ואישור חריגות משלוח</title>
+    <!-- SheetJS (XLSX / CSV) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Assistant:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Assistant', sans-serif; }
+        body { background-color: #ffffff; color: #000000; padding: 30px; direction: rtl; text-align: right; }
+
+        .header-container { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #000000; padding-bottom: 12px; margin-bottom: 24px; }
+        .header-container h1 { font-size: 1.6rem; font-weight: 700; margin: 0; }
+        .bsd { font-size: 1.1rem; font-weight: 700; }
+
+        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 24px; }
+        .card { border: 1px solid #000000; border-radius: 4px; padding: 20px; background: #ffffff; }
+        .card-title { font-size: 1.1rem; font-weight: 700; border-bottom: 1px solid #e2e8f0; padding-bottom: 8px; margin-bottom: 16px; }
+
+        label { display: block; font-weight: 600; font-size: 0.95rem; margin-bottom: 6px; }
+        input[type="file"], input[type="text"], select { width: 100%; padding: 10px; border: 1px solid #000000; border-radius: 4px; font-size: 0.95rem; margin-bottom: 12px; }
+
+        .btn { background-color: #000000; color: #ffffff; border: none; padding: 10px 18px; font-size: 0.95rem; font-weight: 700; cursor: pointer; border-radius: 4px; display: inline-block; transition: background 0.2s ease; }
+        .btn:hover { background-color: #333333; }
+        .btn-outline { background-color: #ffffff; color: #000000; border: 1px solid #000000; }
+        .btn-outline:hover { background-color: #f0f0f0; }
+
+        .alert-box { padding: 16px; border: 2px solid #000000; border-radius: 4px; margin-top: 15px; display: none; }
+        .alert-success { background-color: #f0fdf4; border-color: #16a34a; color: #15803d; }
+        .alert-danger { background-color: #fef2f2; border-color: #dc2626; color: #b91c1c; }
+
+        .status-badge { display: inline-block; padding: 4px 10px; font-weight: 700; font-size: 0.85rem; border-radius: 3px; margin-bottom: 10px; }
+        .badge-approved { background: #000; color: #fff; }
+        .badge-blocked { background: #dc2626; color: #fff; }
+
+        table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 0.9rem; }
+        th, td { border: 1px solid #000000; padding: 10px; text-align: right; }
+        th { background-color: #f8fafc; font-weight: 700; }
+    </style>
+</head>
+<body>
+
+    <div class="header-container">
+        <div class="bsd">בס"ד</div>
+        <h1>שער בקרת אובליגו ואישור חריגות משלוח</h1>
+        <div></div>
+    </div>
+
+    <div class="grid-2">
+        <div class="card">
+            <div class="card-title">1. טעינת נתוני לקוחות מחשבשבת</div>
+            <label for="excelFile">בחר קובץ Excel (.xlsx / .xls) או CSV:</label>
+            <input type="file" id="excelFile" accept=".xlsx, .xls, .csv">
+            <small style="color: #666; display: block; margin-top: -6px;">עמודות מזוהות: מפתח/קוד לקוח, שם לקוח, יתרת חוב, תקרת אובליגו, טלפון</small>
+        </div>
+
+        <div class="card">
+            <div class="card-title">2. בדיקת אישור הנספח/תעודה לפני הפקה</div>
+            <label for="customerSelect">בחר לקוח לבדיקה:</label>
+            <select id="customerSelect" disabled>
+                <option value="">-- יש לטעון קובץ נתונים תחילה --</option>
+            </select>
+            
+            <label for="orderAmount">סכום ההזמנה/המשלוח הנוכחי (₪):</label>
+            <input type="text" id="orderAmount" placeholder="הכנס סכום ב-₪">
+            
+            <button class="btn" id="checkBtn" disabled>בדוק אישור אובליגו</button>
+        </div>
+    </div>
+
+    <div class="card" id="resultCard" style="display: none;">
+        <div class="card-title">תוצאת בדיקת אשראי והרשאה</div>
+        <div id="resultContent"></div>
+    </div>
+
+    <div class="card" id="tableCard" style="display: none; margin-top: 24px;">
+        <div class="card-title">ריכוז סטטוס אובליגו וחריגות במערכת</div>
+        <table>
+            <thead>
+                <tr>
+                    <th>מפתח לקוח</th>
+                    <th>שם לקוח</th>
+                    <th>יתרת חוב</th>
+                    <th>תקרת אובליגו</th>
+                    <th>חריגה צפויה</th>
+                    <th>סטטוס ניהולי</th>
+                </tr>
+            </thead>
+            <tbody id="customersTableBody"></tbody>
+        </table>
+    </div>
+
+    <script>
+        let customersData = {};
+        const masterPinCode = "9988";
+
+        const fileInput = document.getElementById('excelFile');
+        const customerSelect = document.getElementById('customerSelect');
+        const checkBtn = document.getElementById('checkBtn');
+        const resultCard = document.getElementById('resultCard');
+        const resultContent = document.getElementById('resultContent');
+        const tableCard = document.getElementById('tableCard');
+        const customersTableBody = document.getElementById('customersTableBody');
+
+        fileInput.addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    const data = new Uint8Array(e.target.result);
+                    const workbook = XLSX.read(data, { type: 'array' });
+                    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+                    const jsonRows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+                    
+                    parseCustomerData(jsonRows);
+                } catch (err) {
+                    alert('שגיאה בקריאת הקובץ. ודא שהקובץ תקין.');
+                }
+            };
+            reader.readAsArrayBuffer(file);
+        });
+
+        function parseCustomerData(data) {
+            customersData = {};
+            customerSelect.innerHTML = '<option value="">-- בחר לקוח מהרשימה --</option>';
+
+            data.forEach(row => {
+                const key = row['מפתח'] || row['מספר לקוח'] || row['קוד לקוח'] || Object.values(row)[0];
+                const name = row['שם לקוח'] || row['שם'] || row['לקוח'] || 'לקוח ללא שם';
+                const debt = parseFloat(row['יתרת חוב'] || row['חוב'] || row['יתרה'] || 0);
+                const limit = parseFloat(row['תקרת אובליגו'] || row['אובליגו'] || row['מסגרת אשראי'] || 0);
+                const managerPhone = row['טלפון'] || row['סלולרי'] || row['נייד'] || '';
+
+                if (key && key !== 'מפתח') {
+                    customersData[key] = { key, name, debt, limit, managerPhone };
+                    
+                    const option = document.createElement('option');
+                    option.value = key;
+                    option.textContent = `${key} - ${name} (חוב: ₪${debt.toLocaleString()} | אובליגו: ₪${limit.toLocaleString()})`;
+                    customerSelect.appendChild(option);
+                }
+            });
+
+            customerSelect.disabled = false;
+            checkBtn.disabled = false;
+            renderTable();
+            alert('נתוני הלקוחות מהאקסל נטענו בהצלחה!');
+        }
+
+        checkBtn.addEventListener('click', function() {
+            const selectedKey = customerSelect.value;
+            const amount = parseFloat(document.getElementById('orderAmount').value || 0);
+
+            if (!selectedKey) {
+                alert('אנא בחר לקוח לבדיקה');
+                return;
+            }
+
+            const customer = customersData[selectedKey];
+            const totalProjectedDebt = customer.debt + amount;
+            const isOverLimit = customer.limit > 0 && totalProjectedDebt > customer.limit;
+
+            resultCard.style.display = 'block';
+
+            if (!isOverLimit) {
+                resultContent.innerHTML = `
+                    <div class="status-badge badge-approved">מאושר להפקה</div>
+                    <p><strong>הלקוח:</strong> ${customer.name} (מפתח: ${customer.key})</p>
+                    <p><strong>יתרה נוכחית:</strong> ₪${customer.debt.toLocaleString()}</p>
+                    <p><strong>סכום תעודה מבוקש:</strong> ₪${amount.toLocaleString()}</p>
+                    <p><strong>תקרת אובליגו:</strong> ₪${customer.limit.toLocaleString()}</p>
+                    <div class="alert-box alert-success" style="display:block; margin-top:12px;">
+                        ✔ העסקה בגבולות האובליגו. ניתן להפיק תעודת משלוח בחשבשבת כרגיל.
+                    </div>
+                `;
+            } else {
+                const excessAmount = totalProjectedDebt - customer.limit;
+                resultContent.innerHTML = `
+                    <div class="status-badge badge-blocked">חריגת אובליגו - חסום להפקה</div>
+                    <p><strong>הלקוח:</strong> ${customer.name} (מפתח: ${customer.key})</p>
+                    <p><strong>יתרה צפויה:</strong> ₪${totalProjectedDebt.toLocaleString()}</p>
+                    <p><strong>תקרת אובליגו:</strong> ₪${customer.limit.toLocaleString()}</p>
+                    <p style="color: #b91c1c; font-weight:700;"><strong>גובה החריגה:</strong> ₪${excessAmount.toLocaleString()}</p>
+                    
+                    <div class="alert-box alert-danger" style="display:block; margin-top:12px;">
+                        ⛔ חריגה מהאובליגו! אין להפיק תעודת משלוח בחשבשבת ללא אישור מנהל.
+                    </div>
+
+                    <div style="margin-top: 16px; display:flex; gap:10px;">
+                        <button class="btn btn-outline" onclick="requestManagerApproval('${customer.name}', ${excessAmount})">
+                            📱 שלח בקשת אישור ב-WhatsApp למנהל
+                        </button>
+                        <button class="btn" onclick="promptManagerCode()">
+                            🔑 הזן קוד שחרור מנהל
+                        </button>
+                    </div>
+                `;
+            }
+        });
+
+        function requestManagerApproval(customerName, excess) {
+            const msg = encodeURIComponent(`שלום,\nמבוקש אישור חריגת אובליגו עבור הלקוח: ${customerName}.\nגובה החריגה הצפוי: ₪${excess.toLocaleString()}.\nלאישור, נא לספק קוד שחרור.`);
+            window.open(`https://wa.me/?text=${msg}`, '_blank');
+        }
+
+        function promptManagerCode() {
+            const code = prompt("הכנס קוד שחרור מנהל לבדיקה:");
+            if (code === masterPinCode) {
+                alert("✔ הקוד אושר בהצלחה! ניתן להנפיק את תעודת המשלוח כעת.");
+            } else if (code !== null) {
+                alert("❌ קוד שגוי! השחרור נדחה.");
+            }
+        }
+
+        function renderTable() {
+            let html = '';
+            for (let k in customersData) {
+                const c = customersData[k];
+                const isExceeded = c.limit > 0 && c.debt > c.limit;
+                html += `<tr>
+                    <td>${c.key}</td>
+                    <td><strong>${c.name}</strong></td>
+                    <td>₪${c.debt.toLocaleString()}</td>
+                    <td>${c.limit ? '₪' + c.limit.toLocaleString() : 'ללא הגבלה'}</td>
+                    <td>${isExceeded ? '<span style="color:#b91c1c; font-weight:700;">₪' + (c.debt - c.limit).toLocaleString() + '</span>' : '-'}</td>
+                    <td>${isExceeded ? '<span class="status-badge badge-blocked">חורג</span>' : '<span class="status-badge badge-approved">תקין</span>'}</td>
+                </tr>`;
+            }
+            customersTableBody.innerHTML = html;
+            tableCard.style.display = 'block';
+        }
+    </script>
+</body>
+</html>
