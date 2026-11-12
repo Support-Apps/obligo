@@ -70,6 +70,17 @@
         </div>
     </div>
 
+    <div class="card" style="margin-bottom: 24px;">
+        <div class="card-title">3. חיבור ישיר לחשבשבת (אופציונלי)</div>
+        <label for="apiUrl">כתובת החיבור:</label>
+        <input type="text" id="apiUrl" placeholder="https://...">
+        <label for="apiKey">מפתח גישה (אם נדרש):</label>
+        <input type="text" id="apiKey" placeholder="מפתח גישה" style="-webkit-text-security: disc;">
+        <button class="btn" id="connectBtn">שמור וטען נתונים מהחשבשבת</button>
+        <button class="btn btn-outline" id="disconnectBtn">נתק חיבור</button>
+        <small style="color: #666; display: block; margin-top: 8px;">כשהחיבור פעיל, הנתונים מתרעננים אוטומטית לפני כל בדיקת אובליגו.</small>
+    </div>
+
     <div class="card" id="resultCard" style="display: none;">
         <div class="card-title">תוצאת בדיקת אשראי והרשאה</div>
         <div id="resultContent"></div>
@@ -92,9 +103,27 @@
         </table>
     </div>
 
+    <div class="card" id="logCard" style="display: none; margin-top: 24px;">
+        <div class="card-title">יומן אישורי חריגה</div>
+        <table>
+            <thead><tr><th>מספר אישור</th><th>תאריך ושעה</th><th>לקוח</th><th>סכום משלוח</th><th>חריגה</th></tr></thead>
+            <tbody id="logBody"></tbody>
+        </table>
+    </div>
+
     <script>
         let customersData = {};
         const masterPinCode = "9988";
+        let lastCheck = null;
+        let approvalLog = [];
+        try { approvalLog = JSON.parse(localStorage.getItem('obligoApprovalLog') || '[]'); } catch (e) {}
+
+        // ניקוי מספרים מאקסל: מטפל ב-1,234.50 / ₪ / רווחים / ריק
+        function toNum(v) {
+            if (typeof v === 'number') return isFinite(v) ? v : 0;
+            const n = parseFloat(String(v).replace(/[₪,\s]/g, ''));
+            return isNaN(n) ? 0 : n;
+        }
 
         const fileInput = document.getElementById('excelFile');
         const customerSelect = document.getElementById('customerSelect');
@@ -103,6 +132,45 @@
         const resultContent = document.getElementById('resultContent');
         const tableCard = document.getElementById('tableCard');
         const customersTableBody = document.getElementById('customersTableBody');
+
+        renderLog();
+
+        // ---- חיבור ישיר לחשבשבת ----
+        let apiConfig = { url: '', key: '' };
+        try { apiConfig = JSON.parse(localStorage.getItem('obligoApiConfig') || '{"url":"","key":""}'); } catch (e) {}
+        document.getElementById('apiUrl').value = apiConfig.url || '';
+        document.getElementById('apiKey').value = apiConfig.key || '';
+
+        async function loadFromServer(silent) {
+            try {
+                const headers = {};
+                if (apiConfig.key) headers['Authorization'] = 'Bearer ' + apiConfig.key;
+                const res = await fetch(apiConfig.url, { headers });
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                let rows = await res.json();
+                if (!Array.isArray(rows)) rows = rows.data || rows.rows || rows.customers || [];
+                if (!rows.length) throw new Error('לא התקבלו נתוני לקוחות');
+                parseCustomerData(rows, silent);
+                return true;
+            } catch (err) {
+                alert('לא ניתן לטעון נתונים מהחשבשבת: ' + err.message + (silent ? '\nהבדיקה תתבסס על הנתונים האחרונים שנטענו.' : ''));
+                return false;
+            }
+        }
+
+        document.getElementById('connectBtn').addEventListener('click', async function() {
+            apiConfig = { url: document.getElementById('apiUrl').value.trim(), key: document.getElementById('apiKey').value.trim() };
+            if (!apiConfig.url) { alert('אנא הכנס כתובת חיבור'); return; }
+            try { localStorage.setItem('obligoApiConfig', JSON.stringify(apiConfig)); } catch (e) {}
+            await loadFromServer(false);
+        });
+
+        document.getElementById('disconnectBtn').addEventListener('click', function() {
+            apiConfig = { url: '', key: '' };
+            document.getElementById('apiUrl').value = '';
+            document.getElementById('apiKey').value = '';
+            try { localStorage.removeItem('obligoApiConfig'); } catch (e) {}
+        });
 
         fileInput.addEventListener('change', function(e) {
             const file = e.target.files[0];
@@ -124,15 +192,17 @@
             reader.readAsArrayBuffer(file);
         });
 
-        function parseCustomerData(data) {
+        function parseCustomerData(data, silent) {
             customersData = {};
             customerSelect.innerHTML = '<option value="">-- בחר לקוח מהרשימה --</option>';
 
-            data.forEach(row => {
+            data.forEach(rawRow => {
+                const row = {};
+                Object.keys(rawRow).forEach(h => { row[String(h).trim()] = rawRow[h]; });
                 const key = row['מפתח'] || row['מספר לקוח'] || row['קוד לקוח'] || Object.values(row)[0];
                 const name = row['שם לקוח'] || row['שם'] || row['לקוח'] || 'לקוח ללא שם';
-                const debt = parseFloat(row['יתרת חוב'] || row['חוב'] || row['יתרה'] || 0);
-                const limit = parseFloat(row['תקרת אובליגו'] || row['אובליגו'] || row['מסגרת אשראי'] || 0);
+                const debt = toNum(row['יתרת חוב'] || row['חוב'] || row['יתרה'] || 0);
+                const limit = toNum(row['תקרת אובליגו'] || row['אובליגו'] || row['מסגרת אשראי'] || 0);
                 const managerPhone = row['טלפון'] || row['סלולרי'] || row['נייד'] || '';
 
                 if (key && key !== 'מפתח') {
@@ -148,12 +218,17 @@
             customerSelect.disabled = false;
             checkBtn.disabled = false;
             renderTable();
-            alert('נתוני הלקוחות מהאקסל נטענו בהצלחה!');
+            if (!silent) alert('נתוני הלקוחות נטענו בהצלחה!');
         }
 
-        checkBtn.addEventListener('click', function() {
+        checkBtn.addEventListener('click', async function() {
+            const previousKey = customerSelect.value;
+            if (apiConfig.url) {
+                await loadFromServer(true);
+                customerSelect.value = previousKey;
+            }
             const selectedKey = customerSelect.value;
-            const amount = parseFloat(document.getElementById('orderAmount').value || 0);
+            const amount = toNum(document.getElementById('orderAmount').value);
 
             if (!selectedKey) {
                 alert('אנא בחר לקוח לבדיקה');
@@ -165,6 +240,7 @@
             const isOverLimit = customer.limit > 0 && totalProjectedDebt > customer.limit;
 
             resultCard.style.display = 'block';
+            lastCheck = { customer, amount, excess: Math.max(0, totalProjectedDebt - customer.limit) };
 
             if (!isOverLimit) {
                 resultContent.innerHTML = `
@@ -191,7 +267,7 @@
                     </div>
 
                     <div style="margin-top: 16px; display:flex; gap:10px;">
-                        <button class="btn btn-outline" onclick="requestManagerApproval('${customer.name}', ${excessAmount})">
+                        <button class="btn btn-outline" onclick="requestManagerApproval()">
                             📱 שלח בקשת אישור ב-WhatsApp למנהל
                         </button>
                         <button class="btn" onclick="promptManagerCode()">
@@ -202,18 +278,44 @@
             }
         });
 
-        function requestManagerApproval(customerName, excess) {
-            const msg = encodeURIComponent(`שלום,\nמבוקש אישור חריגת אובליגו עבור הלקוח: ${customerName}.\nגובה החריגה הצפוי: ₪${excess.toLocaleString()}.\nלאישור, נא לספק קוד שחרור.`);
+        function requestManagerApproval() {
+            if (!lastCheck) return;
+            const c = lastCheck.customer;
+            const msg = encodeURIComponent(`שלום,\nמבוקש אישור חריגת אובליגו עבור הלקוח: ${c.name} (מפתח ${c.key}).\nסכום המשלוח: ₪${lastCheck.amount.toLocaleString()}.\nגובה החריגה הצפוי: ₪${lastCheck.excess.toLocaleString()}.\nלאישור, נא לספק קוד שחרור.`);
             window.open(`https://wa.me/?text=${msg}`, '_blank');
         }
 
         function promptManagerCode() {
-            const code = prompt("הכנס קוד שחרור מנהל לבדיקה:");
-            if (code === masterPinCode) {
-                alert("✔ הקוד אושר בהצלחה! ניתן להנפיק את תעודת המשלוח כעת.");
-            } else if (code !== null) {
+            if (!lastCheck) return;
+            const code = prompt("הכנס קוד שחרור מנהל:");
+            if (code === null) return;
+            if (code !== masterPinCode) {
                 alert("❌ קוד שגוי! השחרור נדחה.");
+                return;
             }
+            const c = lastCheck.customer;
+            const d = new Date();
+            const approvalNo = 'AP-' + d.toISOString().slice(2, 10).replace(/-/g, '') + '-' + Math.floor(1000 + Math.random() * 9000);
+            approvalLog.unshift({ no: approvalNo, time: d.toLocaleString('he-IL'), key: c.key, name: c.name, amount: lastCheck.amount, excess: lastCheck.excess });
+            try { localStorage.setItem('obligoApprovalLog', JSON.stringify(approvalLog)); } catch (e) {}
+            renderLog();
+            resultContent.innerHTML = `
+                <div class="status-badge badge-approved">חריגה אושרה ע"י מנהל</div>
+                <p><strong>הלקוח:</strong> ${c.name} (מפתח: ${c.key})</p>
+                <p><strong>סכום משלוח מאושר:</strong> ₪${lastCheck.amount.toLocaleString()}</p>
+                <p><strong>גובה החריגה:</strong> ₪${lastCheck.excess.toLocaleString()}</p>
+                <div class="alert-box alert-success" style="display:block; margin-top:12px;">
+                    מספר אישור: <strong style="font-size:1.3rem;">${approvalNo}</strong><br>
+                    יש לרשום את מספר האישור על תעודת המשלוח. אין לשחרר סחורה ללא מספר אישור.
+                </div>
+            `;
+        }
+
+        function renderLog() {
+            document.getElementById('logCard').style.display = approvalLog.length ? 'block' : 'none';
+            document.getElementById('logBody').innerHTML = approvalLog.map(e => `<tr>
+                <td>${e.no}</td><td>${e.time}</td><td>${e.key} - ${e.name}</td>
+                <td>₪${e.amount.toLocaleString()}</td><td>₪${e.excess.toLocaleString()}</td></tr>`).join('');
         }
 
         function renderTable() {
